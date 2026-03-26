@@ -3563,6 +3563,55 @@ test("Miniflare: custom Node service binding", async ({ expect }) => {
 	);
 });
 
+test("Miniflare: WebSocket upgrade through Node service binding does not crash server", async ({
+	expect,
+}) => {
+	// Regression test for https://github.com/cloudflare/workers-sdk/issues/13054
+	// When a Worker proxies a WebSocket upgrade through a node: service binding,
+	// miniflare injected the MF-Custom-Node-Service header into the request.
+	// #handleLoopbackUpgrade called #handleLoopback without a `res` argument,
+	// which crashed the process via assert(res) when that header was present.
+	const mf = new Miniflare({
+		modules: true,
+		script: `
+		export default {
+			fetch(request, env) {
+				// Forward the WebSocket upgrade to the node: service binding,
+				// mirroring what ViteProxyWorker does with __VITE_MIDDLEWARE__.
+				return env.CUSTOM.fetch(request);
+			}
+		}`,
+		serviceBindings: {
+			CUSTOM: {
+				// A node: service binding injects MF-Custom-Node-Service into all
+				// proxied requests, including WebSocket upgrades.
+				node: (_req, res) => {
+					res.writeHead(400);
+					res.end("node service does not handle WebSocket upgrades");
+				},
+			},
+		},
+	});
+	useDispose(mf);
+
+	// Before the fix this crashed with:
+	// AssertionError [ERR_ASSERTION]: undefined == true
+	//   at #handleLoopback (miniflare/dist/src/index.js)
+	//   at #handleLoopbackUpgrade (miniflare/dist/src/index.js)
+	const response = await mf.dispatchFetch("http://localhost", {
+		headers: { Upgrade: "websocket" },
+	});
+	// The server must still be alive and return a response (not crash).
+	// Stripping the MF-Custom-Node-Service header means #handleLoopback treats
+	// this as a regular fetch (not a node service call). The worker's script
+	// forwards the request to env.CUSTOM, but the upgrade path bypasses the
+	// node handler, so the response will be a 500 ("did not return status 101
+	// Switching Protocols response with Web Socket").
+	expect(response.status).toBe(500);
+	// Consume the body to avoid "body not consumed immediately" warnings.
+	await response.arrayBuffer();
+});
+
 test("Miniflare: custom Node outbound service", async ({ expect }) => {
 	const mf = new Miniflare({
 		modules: true,
