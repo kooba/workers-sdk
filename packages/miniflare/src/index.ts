@@ -1389,6 +1389,14 @@ export class Miniflare {
 			return;
 		}
 
+		// Service bindings inject the `MF-Custom-Node-Service` header into all
+		// proxied requests so they are routed to the custom node service handler
+		// inside `#handleLoopback`. That handler requires a plain HTTP `res`
+		// object, which does not exist for WebSocket upgrades. Strip the header
+		// here so `#handleLoopback` processes this as a regular WebSocket
+		// upgrade rather than delegating to the node service handler.
+		delete req.headers[CoreHeaders.CUSTOM_NODE_SERVICE.toLowerCase()];
+
 		// Otherwise, try handle the request in a worker
 		const response = await this.#handleLoopback(req);
 

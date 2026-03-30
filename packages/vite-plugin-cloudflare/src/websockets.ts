@@ -1,8 +1,8 @@
 import { createHeaders } from "@remix-run/node-fetch-server";
-import { CoreHeaders, coupleWebSocket } from "miniflare";
+import { coupleWebSocket } from "miniflare";
 import { WebSocketServer } from "ws";
 import { UNKNOWN_HOST } from "./shared";
-import type { Miniflare } from "miniflare";
+import type { Miniflare, Response as MiniflareResponse } from "miniflare";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type * as vite from "vite";
@@ -40,14 +40,34 @@ export function handleWebSocket(
 
 			const headers = createHeaders(request);
 
-			if (entryWorkerName) {
-				headers.set(CoreHeaders.ROUTE_OVERRIDE, entryWorkerName);
+			// When an entryWorkerName is provided we dispatch directly to the named
+			// worker via `getWorker()` instead of going through `dispatchFetch()`.
+			// `dispatchFetch()` routes through ViteProxyWorker whose `fetch` handler
+			// forwards every request — including WebSocket upgrades — to the
+			// `__VITE_MIDDLEWARE__` node service binding.  That binding only handles
+			// plain HTTP (it wraps Vite's Connect middleware stack), so WebSocket
+			// upgrades are silently discarded.  `getWorker(entryWorkerName).fetch()`
+			// bypasses ViteProxyWorker entirely and talks directly to the user worker
+			// via workerd's ProxyClient `Fetcher#fetch()`, which internally uses
+			// `dispatchFetch()` and supports WebSocket upgrades.
+			let response: MiniflareResponse;
+			try {
+				if (entryWorkerName) {
+					const worker = await miniflare.getWorker(entryWorkerName);
+					response = await worker.fetch(url, {
+						headers,
+						method: request.method,
+					});
+				} else {
+					response = await miniflare.dispatchFetch(url, {
+						headers,
+						method: request.method,
+					});
+				}
+			} catch {
+				socket.destroy();
+				return;
 			}
-
-			const response = await miniflare.dispatchFetch(url, {
-				headers,
-				method: request.method,
-			});
 			const workerWebSocket = response.webSocket;
 
 			if (!workerWebSocket) {
